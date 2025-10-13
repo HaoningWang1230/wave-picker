@@ -360,32 +360,61 @@ if st.button("开始计算", type="primary", use_container_width=True):
             st.warning("未生成任何拣选单（窗口内可能没有完整订单或策略筛空）。")
             st.stop()
 
-        # 1) 每天的拣选单数量表
-        st.subheader("每天拣选单数量")
-        st.dataframe(DAILY_COUNTS, use_container_width=True)
+        # —— 只做一个汇总表 —— 
+        # 1) 每天×品类数 的计数（用于拿单品/双品数量）
+        by_day_kind = (
+            PICKLIST_DETAIL.groupby(["生产日期", "品类数"])["拣选单ID"]
+            .nunique()
+            .reset_index(name="拣选单数")
+        )
 
-        # 2) 每天概览：总数 / 单品 / 两品 / >2 平均品数 / ≥2 品包裹占比
-        st.subheader("每天拣选单概览")
-        by_day_kind = (PICKLIST_DETAIL.groupby(["生产日期","品类数"])["拣选单ID"]
-                       .nunique().reset_index(name="拣选单数"))
-        total_by_day = (PICKLIST_DETAIL.groupby("生产日期")["拣选单ID"]
-                        .nunique().to_dict())
+        # 2) 每天总拣选单数
+        total_by_day = (
+            PICKLIST_DETAIL.groupby("生产日期")["拣选单ID"]
+            .nunique()
+            .to_dict()
+        )
 
-        lines = ["【每天拣选单概览：总数 / 单品 / 两品 / >2 平均品数 / ≥2品包裹占比】"]
+        # 3) 逐日汇总
+        rows = []
         for d in sorted(DAILY_ROWS.keys()):
             sub_cnt = by_day_kind[by_day_kind["生产日期"] == d]
-            total_cnt  = int(total_by_day.get(d, 0))
+
+            total_cnt  = int(total_by_day.get(d, 0))  # 拣选单数量
             single_cnt = int(sub_cnt.loc[sub_cnt["品类数"] == 1, "拣选单数"].sum()) if not sub_cnt.empty else 0
             two_cnt    = int(sub_cnt.loc[sub_cnt["品类数"] == 2, "拣选单数"].sum()) if not sub_cnt.empty else 0
-            gt2_rows = PICKLIST_DETAIL[(PICKLIST_DETAIL["生产日期"] == d) & (PICKLIST_DETAIL["品类数"] > 2)]
-            avg_str = f"{gt2_rows['品类数'].mean():.2f}" if len(gt2_rows) > 0 else "-"
+
+            # 3品及以上平均品类
+            gt3_rows = PICKLIST_DETAIL[
+                (PICKLIST_DETAIL["生产日期"] == d) & (PICKLIST_DETAIL["品类数"] >= 3)
+            ]
+            avg_gt3 = float(gt3_rows["品类数"].mean()) if len(gt3_rows) > 0 else float("nan")
+
+            # 散单占比：≥2品拣选单的包裹数 / 当天所有拣选单的包裹数
             pl_today = PICKLIST_DETAIL[PICKLIST_DETAIL["生产日期"] == d]
             total_packages = int(pl_today["包裹数"].sum())
-            ge2_packages = int(pl_today.loc[pl_today["品类数"] >= 2, "包裹数"].sum())
-            ratio_str = f"{(ge2_packages / total_packages * 100):.2f}%" if total_packages > 0 else "-"
-            lines.append(f"{d}: 总计 {total_cnt} 条，单品 {single_cnt} 条，两个品 {two_cnt} 条，>2 平均 {avg_str} 个品，≥2品包裹占比 {ratio_str}")
+            ge2_packages   = int(pl_today.loc[pl_today["品类数"] >= 2, "包裹数"].sum())
+            ratio = (ge2_packages / total_packages * 100) if total_packages > 0 else float("nan")
 
-        st.code("\n".join(lines), language="text")
+            rows.append({
+                "日期": d,
+                "拣选单数量": total_cnt,
+                "单品数量": single_cnt,
+                "双品数量": two_cnt,
+                "3品及以上平均品类": round(avg_gt3, 2) if pd.notna(avg_gt3) else None,
+                "散单占比": f"{ratio:.2f}%" if pd.notna(ratio) else "-"
+            })
+
+        summary_df = pd.DataFrame(rows, columns=[
+            "日期","拣选单数量","单品数量","双品数量","3品及以上平均品类","散单占比"
+        ])
+
+        st.dataframe(summary_df, use_container_width=True)
+
+        # （可选）下载
+        csv = summary_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button("下载汇总表 CSV", data=csv, file_name="daily_summary.csv", mime="text/csv")
+
         st.toast("计算完成 ✅", icon="✅")
 
     except Exception as e:
